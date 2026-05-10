@@ -11,6 +11,7 @@ import csv
 import sqlite3
 import sys
 
+from .massive_pipeline import sync_massive_rth_4h_candles
 from .russell1000_loader import sync_russell1000_from_wikipedia
 
 AnchorKind = Literal["earnings", "yearly"]
@@ -217,6 +218,9 @@ def screen_russell1000_vwap_proximity(
     end_date: date | str | None = None,
     symbol_limit: int | None = None,
     store_results: bool = True,
+    populate_candles_if_missing: bool = True,
+    massive_start_date: date | str | None = None,
+    massive_end_date: date | str | None = None,
 ) -> list[VwapProximityHit]:
     """Run the screener against Russell 1000 symbols and stored Massive 4-hour candles.
 
@@ -228,6 +232,16 @@ def screen_russell1000_vwap_proximity(
 
     with sqlite3.connect(db_path) as connection:
         symbols = _load_russell_symbols(connection, symbol_limit)
+
+    if populate_candles_if_missing:
+        _ensure_massive_rth_4h_candles(
+            db_path,
+            symbols,
+            start_date=massive_start_date or start_date,
+            end_date=massive_end_date or end_date,
+        )
+
+    with sqlite3.connect(db_path) as connection:
         candles = _load_candles(
             connection, symbols, start_date=start_date, end_date=end_date
         )
@@ -256,6 +270,35 @@ def _ensure_russell1000_components(db_path: str) -> None:
         if _table_has_rows(connection, "russell_1000_components"):
             return
     sync_russell1000_from_wikipedia(db_path)
+
+
+def _ensure_massive_rth_4h_candles(
+    db_path: str,
+    symbols: list[str],
+    *,
+    start_date: date | str | None,
+    end_date: date | str | None,
+) -> None:
+    """Load Massive 4-hour candles when the local candle table is unavailable."""
+
+    with sqlite3.connect(db_path) as connection:
+        if _table_has_rows(connection, "massive_rth_4h_candles"):
+            return
+    if not symbols:
+        return
+
+    effective_end = _date_arg(end_date) if end_date is not None else date.today()
+    effective_start = (
+        _date_arg(start_date)
+        if start_date is not None
+        else date(effective_end.year, 1, 1)
+    )
+    sync_massive_rth_4h_candles(
+        db_path,
+        symbols,
+        effective_start,
+        effective_end,
+    )
 
 
 def _table_has_rows(connection: sqlite3.Connection, table_name: str) -> bool:

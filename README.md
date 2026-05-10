@@ -31,7 +31,7 @@ The project is split into four main functions/workflows:
 
 - Python 3.11 or newer
 - Flask, installed through this package's dependencies
-- A Massive.com API key in `MASSIVE_API_KEY` when fetching market data
+- A Massive.com API key in `MASSIVE_API_KEY` when fetching market data. You can put it in a local `.env` file.
 
 ## Setup
 
@@ -56,7 +56,13 @@ load-russell1000 stocks.sqlite3
 
 ### 2. Fetch Massive four-hour candle data
 
-Set your Massive API key first:
+Set your Massive API key first. The recommended local setup is a gitignored `.env` file:
+
+```bash
+MASSIVE_API_KEY="your-api-key"
+```
+
+You can also export it in your shell:
 
 ```bash
 export MASSIVE_API_KEY="your-api-key"  # macOS/Linux
@@ -127,7 +133,9 @@ py main.py stocks.sqlite3 --host 0.0.0.0 --port 8080 --debug
 
 ## UI Run Scan button
 
-The **Run Scan** button posts to `/run-scan`. If the configured SQLite database file does not exist, the file is created by the scan workflow rather than by simply loading the UI. The button runs the same default scanner as:
+The **Run Scan** button posts to `/run-scan`. If the configured SQLite database file does not exist, the file is created by the scan workflow rather than by simply loading the UI. The scan workflow first ensures the Russell 1000 table exists and is populated, then ensures the Massive four-hour candle table exists and is populated, then loops through the Russell 1000 symbols to build and store the VWAP proximity list.
+
+By default, missing candle data is fetched from Massive for the current calendar year through today, using `MASSIVE_API_KEY` from your environment or local `.env` file. The button runs the same default scanner as:
 
 ```bash
 screen-russell1000-vwap screen stocks.sqlite3

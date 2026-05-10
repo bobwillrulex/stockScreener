@@ -253,3 +253,96 @@ def test_screen_russell1000_vwap_proximity_stores_current_and_new_symbol_lists(
 
     assert current_symbols == [("AAPL",), ("MSFT",)]
     assert new_symbols == [("MSFT",)]
+
+
+def test_screen_russell1000_vwap_proximity_populates_missing_massive_candles(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "stocks.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""
+            CREATE TABLE russell_1000_components (
+                symbol TEXT PRIMARY KEY,
+                company TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+        connection.execute(
+            "INSERT INTO russell_1000_components (symbol, company, source_url) VALUES ('AAPL', 'Apple', 'test')"
+        )
+
+    sync_calls = []
+
+    def fake_sync(db_file, symbols, start_date, end_date):
+        sync_calls.append((db_file, symbols, start_date, end_date))
+        with sqlite3.connect(db_file) as connection:
+            connection.execute("""
+                CREATE TABLE massive_rth_4h_candles (
+                    symbol TEXT NOT NULL,
+                    trading_date TEXT NOT NULL,
+                    bucket_index INTEGER NOT NULL,
+                    start_ts_et TEXT NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL NOT NULL
+                )
+                """)
+            connection.executemany(
+                """
+                INSERT INTO massive_rth_4h_candles (
+                    symbol, trading_date, bucket_index, start_ts_et, high, low, close, volume
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        "AAPL",
+                        "2026-01-02",
+                        0,
+                        "2026-01-02T09:30:00-05:00",
+                        10,
+                        10,
+                        10,
+                        100,
+                    ),
+                    (
+                        "AAPL",
+                        "2026-01-02",
+                        1,
+                        "2026-01-02T13:30:00-05:00",
+                        30,
+                        30,
+                        30,
+                        100,
+                    ),
+                    (
+                        "AAPL",
+                        "2026-01-05",
+                        0,
+                        "2026-01-05T09:30:00-05:00",
+                        20,
+                        20,
+                        20,
+                        100,
+                    ),
+                ],
+            )
+        return 3
+
+    monkeypatch.setattr(
+        "stock_screener.vwap_screener.sync_massive_rth_4h_candles", fake_sync
+    )
+
+    hits = screen_russell1000_vwap_proximity(
+        str(db_path),
+        std_threshold=0.1,
+        massive_start_date="2026-01-01",
+        massive_end_date="2026-01-31",
+    )
+
+    assert sync_calls == [(str(db_path), ["AAPL"], date(2026, 1, 1), date(2026, 1, 31))]
+    assert [(hit.symbol, hit.anchor, hit.trading_date) for hit in hits] == [
+        ("AAPL", "yearly", date(2026, 1, 5))
+    ]
