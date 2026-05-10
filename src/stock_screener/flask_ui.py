@@ -8,7 +8,9 @@ from urllib.parse import quote_plus
 import argparse
 import sqlite3
 
-from typing import Any
+from typing import Any, Callable
+
+from .vwap_screener import VwapProximityHit, screen_russell1000_vwap_proximity
 
 
 DEFAULT_DB_PATH = "stocks.sqlite3"
@@ -55,6 +57,9 @@ INDEX_TEMPLATE = """
       --muted: #9ca3af;
       --border: #263244;
       --accent: #38bdf8;
+      --accent-strong: #0284c7;
+      --success: #22c55e;
+      --danger: #f87171;
       --row-hover: #1f2937;
     }
     * { box-sizing: border-box; }
@@ -67,6 +72,29 @@ INDEX_TEMPLATE = """
     }
     main { width: min(1100px, calc(100% - 32px)); margin: 48px auto; }
     .header { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 24px; }
+    .actions { display: flex; flex-direction: column; gap: 12px; align-items: flex-end; }
+    .run-scan-button {
+      border: 0;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      color: #f8fafc;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 800;
+      padding: 12px 18px;
+      box-shadow: 0 16px 40px rgba(56, 189, 248, 0.28);
+      transition: transform 150ms ease, box-shadow 150ms ease;
+    }
+    .run-scan-button:hover { transform: translateY(-1px); box-shadow: 0 20px 48px rgba(56, 189, 248, 0.34); }
+    .run-scan-button:focus-visible { outline: 3px solid rgba(56, 189, 248, 0.55); outline-offset: 3px; }
+    .status {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 18px;
+      padding: 14px 16px;
+    }
+    .status.success { border-color: rgba(34, 197, 94, 0.45); color: var(--success); }
+    .status.error { border-color: rgba(248, 113, 113, 0.45); color: var(--danger); }
     h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1; letter-spacing: -0.05em; }
     p { margin: 0; color: var(--muted); }
     .card {
@@ -91,6 +119,7 @@ INDEX_TEMPLATE = """
     @media (max-width: 720px) {
       main { margin: 24px auto; }
       .header { display: block; }
+      .actions { align-items: flex-start; margin-top: 18px; }
       th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; }
       th, td { padding: 14px 12px; }
     }
@@ -103,8 +132,16 @@ INDEX_TEMPLATE = """
         <h1>VWAP Proximity</h1>
         <p>Stocks with stored proximity hits, sorted from largest to smallest market cap.</p>
       </div>
-      <p>{{ rows|length }} stocks</p>
+      <div class="actions">
+        <form action="{{ url_for('run_scan') }}" method="post">
+          <button class="run-scan-button" type="submit">Run Scan</button>
+        </form>
+        <p>{{ rows|length }} stocks</p>
+      </div>
     </section>
+    {% if scan_status %}
+    <section class="status {{ scan_status }}" role="status">{{ scan_message }}</section>
+    {% endif %}
     <section class="card">
       {% if rows %}
       <table aria-label="VWAP proximity stocks by market cap">
@@ -142,13 +179,17 @@ INDEX_TEMPLATE = """
 """
 
 
-def create_app(db_path: str = DEFAULT_DB_PATH) -> Any:
+def create_app(
+    db_path: str = DEFAULT_DB_PATH,
+    scan_runner: Callable[..., list[VwapProximityHit]] = screen_russell1000_vwap_proximity,
+) -> Any:
     """Create the Flask application for the proximity dashboard."""
 
-    from flask import Flask, abort, render_template_string
+    from flask import Flask, abort, redirect, render_template_string, request, url_for
 
     app = Flask(__name__)
     app.config["STOCK_SCREENER_DB_PATH"] = db_path
+    app.config["STOCK_SCREENER_SCAN_RUNNER"] = scan_runner
 
     @app.get("/")
     def index() -> str:
@@ -156,7 +197,36 @@ def create_app(db_path: str = DEFAULT_DB_PATH) -> Any:
         if not Path(db_file).exists():
             abort(404, description=f"SQLite database not found: {db_file}")
         rows = load_proximity_rows(db_file)
-        return render_template_string(INDEX_TEMPLATE, rows=rows)
+        return render_template_string(
+            INDEX_TEMPLATE,
+            rows=rows,
+            scan_status=request.args.get("scan_status"),
+            scan_message=request.args.get("scan_message"),
+        )
+
+    @app.post("/run-scan")
+    def run_scan() -> Any:
+        db_file = app.config["STOCK_SCREENER_DB_PATH"]
+        if not Path(db_file).exists():
+            abort(404, description=f"SQLite database not found: {db_file}")
+        runner = app.config["STOCK_SCREENER_SCAN_RUNNER"]
+        try:
+            hits = runner(db_file)
+        except Exception as exc:  # noqa: BLE001 - report scanner failures in the UI.
+            return redirect(
+                url_for(
+                    "index",
+                    scan_status="error",
+                    scan_message=f"Scan failed: {exc}",
+                )
+            )
+        return redirect(
+            url_for(
+                "index",
+                scan_status="success",
+                scan_message=f"Scan complete. Stored {len(hits)} proximity hits.",
+            )
+        )
 
     return app
 

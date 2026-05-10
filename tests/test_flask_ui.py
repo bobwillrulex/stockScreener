@@ -99,3 +99,41 @@ def test_flask_index_renders_clickable_trading_view_rows(tmp_path):
     assert "Mega Corp" in html
     assert "$3.20T" in html
     assert "https://www.tradingview.com/chart/?symbol=MEGA" in html
+
+
+def test_flask_index_renders_run_scan_button(tmp_path):
+    pytest.importorskip("flask")
+    from stock_screener.flask_ui import create_app
+
+    db_path = tmp_path / "stocks.sqlite3"
+    seed_database(db_path)
+    app = create_app(str(db_path))
+
+    response = app.test_client().get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'action="/run-scan"' in html
+    assert 'method="post"' in html
+    assert "Run Scan" in html
+
+
+def test_run_scan_button_invokes_screener_and_reports_status(tmp_path):
+    pytest.importorskip("flask")
+    from stock_screener.flask_ui import create_app
+
+    db_path = tmp_path / "stocks.sqlite3"
+    seed_database(db_path)
+    calls = []
+
+    def fake_runner(db_file):
+        calls.append(db_file)
+        return [object(), object()]
+
+    app = create_app(str(db_path), scan_runner=fake_runner)
+
+    response = app.test_client().post("/run-scan", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert calls == [str(db_path)]
+    assert "Scan complete. Stored 2 proximity hits." in response.get_data(as_text=True)
