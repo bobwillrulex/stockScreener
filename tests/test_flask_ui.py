@@ -174,3 +174,42 @@ def test_run_scan_button_invokes_screener_and_reports_status(tmp_path):
     assert response.status_code == 200
     assert calls == [str(db_path)]
     assert "Scan complete. Stored 2 proximity hits." in response.get_data(as_text=True)
+
+
+def test_flask_index_renders_without_existing_database(tmp_path):
+    pytest.importorskip("flask")
+    from stock_screener.flask_ui import create_app
+
+    db_path = tmp_path / "missing.sqlite3"
+    app = create_app(str(db_path))
+
+    response = app.test_client().get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "No proximity hits found" in html
+    assert "Use Run Scan to create the database" in html
+    assert not db_path.exists()
+
+
+def test_run_scan_button_invokes_screener_without_existing_database(tmp_path):
+    pytest.importorskip("flask")
+    from stock_screener.flask_ui import create_app
+
+    db_path = tmp_path / "missing.sqlite3"
+    calls = []
+
+    def fake_runner(db_file):
+        calls.append(db_file)
+        with sqlite3.connect(db_file) as connection:
+            connection.execute("CREATE TABLE vwap_proximity_hits (symbol TEXT)")
+        return []
+
+    app = create_app(str(db_path), scan_runner=fake_runner)
+
+    response = app.test_client().post("/run-scan", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert calls == [str(db_path)]
+    assert db_path.exists()
+    assert "Scan complete. Stored 0 proximity hits." in response.get_data(as_text=True)

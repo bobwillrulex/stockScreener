@@ -24,7 +24,8 @@ The project is split into four main functions/workflows:
 4. **Launch the web UI**
    - Shows stored VWAP proximity hits sorted from largest to smallest market cap when market-cap data is available.
    - Each ticker links to its TradingView chart.
-   - Includes a **Run Scan** button that runs the VWAP scanner against the configured database and reports success or failure in the page.
+   - Launches even when the configured SQLite database does not exist yet.
+   - Includes a **Run Scan** button that creates the database if needed, runs the VWAP scanner against the configured database, and reports success or failure in the page.
 
 ## Requirements
 
@@ -104,7 +105,7 @@ After setup, start the Flask UI from the repository root:
 py main.py stocks.sqlite3
 ```
 
-The database argument is optional. If omitted, the UI uses `stocks.sqlite3` in the current directory:
+The database argument is optional. If omitted, the UI uses `stocks.sqlite3` in the current directory. The UI can start before this file exists; simply open the page and click **Run Scan** when you are ready to create/populate the database:
 
 ```bash
 py main.py
@@ -126,7 +127,7 @@ py main.py stocks.sqlite3 --host 0.0.0.0 --port 8080 --debug
 
 ## UI Run Scan button
 
-The **Run Scan** button posts to `/run-scan` and runs the same default scanner as:
+The **Run Scan** button posts to `/run-scan`. If the configured SQLite database file does not exist, the file is created by the scan workflow rather than by simply loading the UI. The button runs the same default scanner as:
 
 ```bash
 screen-russell1000-vwap screen stocks.sqlite3

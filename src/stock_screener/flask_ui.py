@@ -219,7 +219,7 @@ INDEX_TEMPLATE = """
       {% else %}
       <div class="empty">
         <h2>No proximity hits found</h2>
-        <p>Run the screener first so <code>vwap_proximity_hits</code> contains rows.</p>
+        <p>Use Run Scan to create the database if needed and populate <code>vwap_proximity_hits</code>.</p>
       </div>
       {% endif %}
     </section>
@@ -237,7 +237,7 @@ def create_app(
 ) -> Any:
     """Create the Flask application for the proximity dashboard."""
 
-    from flask import Flask, abort, redirect, render_template_string, request, url_for
+    from flask import Flask, redirect, render_template_string, request, url_for
 
     app = Flask(__name__)
     app.config["STOCK_SCREENER_DB_PATH"] = db_path
@@ -246,8 +246,6 @@ def create_app(
     @app.get("/")
     def index() -> str:
         db_file = app.config["STOCK_SCREENER_DB_PATH"]
-        if not Path(db_file).exists():
-            abort(404, description=f"SQLite database not found: {db_file}")
         rows = load_proximity_rows(db_file)
         new_rows = load_new_proximity_rows(db_file)
         return render_template_string(
@@ -261,8 +259,6 @@ def create_app(
     @app.post("/run-scan")
     def run_scan() -> Any:
         db_file = app.config["STOCK_SCREENER_DB_PATH"]
-        if not Path(db_file).exists():
-            abort(404, description=f"SQLite database not found: {db_file}")
         runner = app.config["STOCK_SCREENER_SCAN_RUNNER"]
         try:
             hits = runner(db_file)
@@ -287,6 +283,9 @@ def create_app(
 
 def load_proximity_rows(db_path: str) -> list[ProximityStockRow]:
     """Load unique proximity tickers sorted by descending market cap."""
+
+    if not Path(db_path).exists():
+        return []
 
     with sqlite3.connect(db_path) as connection:
         if not _table_exists(connection, "vwap_proximity_hits"):
@@ -349,6 +348,9 @@ def load_proximity_rows(db_path: str) -> list[ProximityStockRow]:
 
 def load_new_proximity_rows(db_path: str) -> list[NewProximityStockRow]:
     """Load stocks that appeared in the latest scan but not the previous scan."""
+
+    if not Path(db_path).exists():
+        return []
 
     with sqlite3.connect(db_path) as connection:
         if not _table_exists(connection, "vwap_proximity_new_symbols"):
