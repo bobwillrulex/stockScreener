@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 from .vwap_screener import VwapProximityHit, screen_russell1000_vwap_proximity
 
-
 DEFAULT_DB_PATH = "stocks.sqlite3"
 TRADING_VIEW_CHART_URL = "https://www.tradingview.com/chart/?symbol={symbol}"
 
@@ -27,6 +26,28 @@ class ProximityStockRow:
     latest_trading_date: str | None
     latest_anchor: str | None
     hit_count: int
+
+    @property
+    def trading_view_url(self) -> str:
+        """Return a TradingView chart URL for this row's ticker."""
+
+        return TRADING_VIEW_CHART_URL.format(symbol=quote_plus(self.symbol))
+
+    @property
+    def formatted_market_cap(self) -> str:
+        """Return a compact human-readable market cap value."""
+
+        return format_market_cap(self.market_cap)
+
+
+@dataclass(frozen=True)
+class NewProximityStockRow:
+    """A proximity stock that was not present in the previous scan's symbol list."""
+
+    symbol: str
+    company: str
+    market_cap: float | None
+    detected_at: str
 
     @property
     def trading_view_url(self) -> str:
@@ -104,6 +125,9 @@ INDEX_TEMPLATE = """
       border-radius: 18px;
       box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
     }
+    .new-stocks { margin-bottom: 22px; }
+    .new-stocks h2 { margin: 0; padding: 18px 20px 0; font-size: 1.15rem; }
+    .new-stocks p { padding: 6px 20px 14px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 18px 20px; text-align: left; border-bottom: 1px solid var(--border); }
     th { color: var(--muted); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -141,6 +165,32 @@ INDEX_TEMPLATE = """
     </section>
     {% if scan_status %}
     <section class="status {{ scan_status }}" role="status">{{ scan_message }}</section>
+    {% endif %}
+    {% if new_rows %}
+    <section class="card new-stocks" aria-label="New proximity stocks from latest scan">
+      <h2>New proximity stocks</h2>
+      <p>Stocks in the latest proximity list that were not in the previous scan.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th>Name</th>
+            <th>Market Cap</th>
+            <th>Detected</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in new_rows %}
+          <tr onclick="window.location='{{ row.trading_view_url }}'" title="Open {{ row.symbol }} in TradingView">
+            <td><a class="row-link ticker" href="{{ row.trading_view_url }}">{{ row.symbol }}</a></td>
+            <td>{{ row.company }}</td>
+            <td class="market-cap">{{ row.formatted_market_cap }}</td>
+            <td class="meta">{{ row.detected_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
     {% endif %}
     <section class="card">
       {% if rows %}
@@ -181,7 +231,9 @@ INDEX_TEMPLATE = """
 
 def create_app(
     db_path: str = DEFAULT_DB_PATH,
-    scan_runner: Callable[..., list[VwapProximityHit]] = screen_russell1000_vwap_proximity,
+    scan_runner: Callable[
+        ..., list[VwapProximityHit]
+    ] = screen_russell1000_vwap_proximity,
 ) -> Any:
     """Create the Flask application for the proximity dashboard."""
 
@@ -197,9 +249,11 @@ def create_app(
         if not Path(db_file).exists():
             abort(404, description=f"SQLite database not found: {db_file}")
         rows = load_proximity_rows(db_file)
+        new_rows = load_new_proximity_rows(db_file)
         return render_template_string(
             INDEX_TEMPLATE,
             rows=rows,
+            new_rows=new_rows,
             scan_status=request.args.get("scan_status"),
             scan_message=request.args.get("scan_message"),
         )
@@ -238,10 +292,11 @@ def load_proximity_rows(db_path: str) -> list[ProximityStockRow]:
         if not _table_exists(connection, "vwap_proximity_hits"):
             return []
         has_components = _table_exists(connection, "russell_1000_components")
-        market_cap_expr = _market_cap_expression(connection) if has_components else "NULL"
+        market_cap_expr = (
+            _market_cap_expression(connection) if has_components else "NULL"
+        )
         if has_components:
-            rows = connection.execute(
-                f"""
+            rows = connection.execute(f"""
                 SELECT
                     h.symbol,
                     COALESCE(r.company, h.symbol) AS company,
@@ -259,11 +314,9 @@ def load_proximity_rows(db_path: str) -> list[ProximityStockRow]:
                 LEFT JOIN russell_1000_components r ON r.symbol = h.symbol
                 GROUP BY h.symbol, company, market_cap
                 ORDER BY market_cap IS NULL, market_cap DESC, h.symbol ASC
-                """
-            ).fetchall()
+                """).fetchall()
         else:
-            rows = connection.execute(
-                """
+            rows = connection.execute("""
                 SELECT
                     h.symbol,
                     h.symbol AS company,
@@ -280,8 +333,7 @@ def load_proximity_rows(db_path: str) -> list[ProximityStockRow]:
                 FROM vwap_proximity_hits h
                 GROUP BY h.symbol
                 ORDER BY h.symbol ASC
-                """
-            ).fetchall()
+                """).fetchall()
     return [
         ProximityStockRow(
             symbol=row[0],
@@ -295,13 +347,56 @@ def load_proximity_rows(db_path: str) -> list[ProximityStockRow]:
     ]
 
 
+def load_new_proximity_rows(db_path: str) -> list[NewProximityStockRow]:
+    """Load stocks that appeared in the latest scan but not the previous scan."""
+
+    with sqlite3.connect(db_path) as connection:
+        if not _table_exists(connection, "vwap_proximity_new_symbols"):
+            return []
+        has_components = _table_exists(connection, "russell_1000_components")
+        market_cap_expr = (
+            _market_cap_expression(connection) if has_components else "NULL"
+        )
+        if has_components:
+            rows = connection.execute(f"""
+                SELECT
+                    n.symbol,
+                    COALESCE(r.company, n.symbol) AS company,
+                    {market_cap_expr} AS market_cap,
+                    n.detected_at
+                FROM vwap_proximity_new_symbols n
+                LEFT JOIN russell_1000_components r ON r.symbol = n.symbol
+                ORDER BY market_cap IS NULL, market_cap DESC, n.symbol ASC
+                """).fetchall()
+        else:
+            rows = connection.execute("""
+                SELECT symbol, symbol AS company, NULL AS market_cap, detected_at
+                FROM vwap_proximity_new_symbols
+                ORDER BY symbol ASC
+                """).fetchall()
+    return [
+        NewProximityStockRow(
+            symbol=row[0],
+            company=row[1],
+            market_cap=row[2],
+            detected_at=row[3],
+        )
+        for row in rows
+    ]
+
+
 def format_market_cap(market_cap: float | None) -> str:
     """Format raw market cap dollars into T/B/M/K notation."""
 
     if market_cap is None:
         return "—"
     abs_value = abs(market_cap)
-    for suffix, threshold in (("T", 1_000_000_000_000), ("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
+    for suffix, threshold in (
+        ("T", 1_000_000_000_000),
+        ("B", 1_000_000_000),
+        ("M", 1_000_000),
+        ("K", 1_000),
+    ):
         if abs_value >= threshold:
             return f"${market_cap / threshold:.2f}{suffix}"
     return f"${market_cap:,.0f}"
@@ -329,7 +424,9 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the stock screener Flask UI.")
-    parser.add_argument("db_path", nargs="?", default=DEFAULT_DB_PATH, help="SQLite database path.")
+    parser.add_argument(
+        "db_path", nargs="?", default=DEFAULT_DB_PATH, help="SQLite database path."
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
     parser.add_argument("--port", type=int, default=5000, help="Port to bind.")
     parser.add_argument("--debug", action="store_true", help="Run Flask in debug mode.")
