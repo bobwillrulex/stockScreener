@@ -9,6 +9,7 @@ requires-python = ">=3.11"
 
 [project.scripts]
 load-russell1000 = "stock_screener.russell1000_loader:main"
+load-massive-rth-4h = "stock_screener.massive_pipeline:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
