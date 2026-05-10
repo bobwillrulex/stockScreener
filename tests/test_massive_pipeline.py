@@ -13,10 +13,24 @@ EASTERN = ZoneInfo("America/New_York")
 
 
 def ms_at(year, month, day, hour, minute):
-    return int(datetime(year, month, day, hour, minute, tzinfo=EASTERN).astimezone(timezone.utc).timestamp() * 1000)
+    return int(
+        datetime(year, month, day, hour, minute, tzinfo=EASTERN)
+        .astimezone(timezone.utc)
+        .timestamp()
+        * 1000
+    )
 
 
-def bar_at(hour, minute, open_price, close_price, volume=100, symbol="AAPL", vwap=None, transactions=1):
+def bar_at(
+    hour,
+    minute,
+    open_price,
+    close_price,
+    volume=100,
+    symbol="AAPL",
+    vwap=None,
+    transactions=1,
+):
     high = max(open_price, close_price) + 1
     low = min(open_price, close_price) - 1
     return MassiveMinuteBar(
@@ -74,13 +88,11 @@ def test_load_massive_4h_candles_to_sqlite_upserts_rows(tmp_path):
     assert load_massive_4h_candles_to_sqlite(str(db_path), updated) == 1
 
     with sqlite3.connect(db_path) as connection:
-        rows = connection.execute(
-            """
+        rows = connection.execute("""
             SELECT symbol, trading_date, bucket_index, start_ts_et, end_ts_et, open, close,
                    volume, minute_count, source
             FROM massive_rth_4h_candles
-            """
-        ).fetchall()
+            """).fetchall()
 
     assert rows == [
         (
@@ -102,11 +114,29 @@ def test_massive_client_fetch_minute_bars_paginates_and_adds_api_key(monkeypatch
     requested_urls = []
     payloads = [
         {
-            "results": [{"t": ms_at(2026, 5, 4, 9, 30), "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10}],
+            "results": [
+                {
+                    "t": ms_at(2026, 5, 4, 9, 30),
+                    "o": 1,
+                    "h": 2,
+                    "l": 0.5,
+                    "c": 1.5,
+                    "v": 10,
+                }
+            ],
             "next_url": "https://api.massive.com/next-page?cursor=abc",
         },
         {
-            "results": [{"t": ms_at(2026, 5, 4, 9, 31), "o": 2, "h": 3, "l": 1.5, "c": 2.5, "v": 20}],
+            "results": [
+                {
+                    "t": ms_at(2026, 5, 4, 9, 31),
+                    "o": 2,
+                    "h": 3,
+                    "l": 1.5,
+                    "c": 2.5,
+                    "v": 20,
+                }
+            ],
         },
     ]
 
@@ -123,4 +153,19 @@ def test_massive_client_fetch_minute_bars_paginates_and_adds_api_key(monkeypatch
         "https://api.massive.com/v2/aggs/ticker/AAPL/range/1/minute/2026-05-04/2026-05-04?"
     )
     assert "apiKey=secret" in requested_urls[0]
-    assert requested_urls[1] == "https://api.massive.com/next-page?cursor=abc&apiKey=secret"
+    assert (
+        requested_urls[1]
+        == "https://api.massive.com/next-page?cursor=abc&apiKey=secret"
+    )
+
+
+def test_massive_client_from_env_loads_api_key_from_dotenv(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+    (tmp_path / ".env").write_text(
+        'MASSIVE_API_KEY="dotenv-secret"\n', encoding="utf-8"
+    )
+
+    client = MassiveClient.from_env()
+
+    assert client.api_key == "dotenv-secret"

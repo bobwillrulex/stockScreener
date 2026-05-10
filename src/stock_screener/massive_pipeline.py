@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Iterable, Sequence
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 from zoneinfo import ZoneInfo
@@ -68,11 +69,12 @@ class MassiveClient:
 
     @classmethod
     def from_env(cls, env_var: str = MASSIVE_API_KEY_ENV) -> "MassiveClient":
-        """Create a client using the API key stored in an environment variable."""
+        """Create a client using the API key stored in an environment variable or .env."""
 
+        _load_dotenv()
         api_key = os.environ.get(env_var, "")
         if not api_key:
-            raise ValueError(f"Set {env_var} to your Massive API key.")
+            raise ValueError(f"Set {env_var} in your environment or .env file.")
         return cls(api_key)
 
     def fetch_minute_bars(
@@ -109,7 +111,9 @@ class MassiveClient:
                 return json.loads(response.read().decode(charset, errors="replace"))
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Massive API request failed with HTTP {error.code}: {body}") from error
+            raise RuntimeError(
+                f"Massive API request failed with HTTP {error.code}: {body}"
+            ) from error
 
     def _with_api_key(self, url: str) -> str:
         parsed = urlparse(url)
@@ -118,7 +122,35 @@ class MassiveClient:
         return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-def build_rth_4h_candles(minute_bars: Iterable[MassiveMinuteBar]) -> list[FourHourCandle]:
+def _load_dotenv(path: str | Path = ".env") -> None:
+    """Load KEY=VALUE pairs from a local .env file without overriding the environment."""
+
+    env_path = Path(path)
+    if not env_path.is_absolute():
+        env_path = Path.cwd() / env_path
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = _strip_env_value(value.strip())
+
+
+def _strip_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def build_rth_4h_candles(
+    minute_bars: Iterable[MassiveMinuteBar],
+) -> list[FourHourCandle]:
     """Filter to US regular trading hours and aggregate into 4-hour session buckets.
 
     Because the US regular session is 6.5 hours long, each full trading day can
@@ -139,13 +171,14 @@ def build_rth_4h_candles(minute_bars: Iterable[MassiveMinuteBar]) -> list[FourHo
     return sorted(candles, key=lambda candle: (candle.symbol, candle.start))
 
 
-def load_massive_4h_candles_to_sqlite(db_path: str, candles: Iterable[FourHourCandle]) -> int:
+def load_massive_4h_candles_to_sqlite(
+    db_path: str, candles: Iterable[FourHourCandle]
+) -> int:
     """Create/update the SQLite table for Massive regular-hours 4-hour candles."""
 
     candle_list = list(candles)
     with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS massive_rth_4h_candles (
                 symbol TEXT NOT NULL,
                 trading_date TEXT NOT NULL,
@@ -166,8 +199,7 @@ def load_massive_4h_candles_to_sqlite(db_path: str, candles: Iterable[FourHourCa
                 fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (symbol, trading_date, bucket_index)
             )
-            """
-        )
+            """)
         connection.executemany(
             """
             INSERT INTO massive_rth_4h_candles (
@@ -211,7 +243,9 @@ def sync_massive_rth_4h_candles(
     api_client = client or MassiveClient.from_env()
     all_candles: list[FourHourCandle] = []
     for symbol in symbols:
-        minute_bars = api_client.fetch_minute_bars(symbol, start_date, end_date, adjusted=adjusted)
+        minute_bars = api_client.fetch_minute_bars(
+            symbol, start_date, end_date, adjusted=adjusted
+        )
         all_candles.extend(build_rth_4h_candles(minute_bars))
     return load_massive_4h_candles_to_sqlite(db_path, all_candles)
 
@@ -228,14 +262,21 @@ def load_symbols_from_sqlite(db_path: str, limit: int | None = None) -> list[str
         return [row[0] for row in connection.execute(query, params).fetchall()]
 
 
-def _aggregate_bucket(key: tuple[str, date, int], bars: list[MassiveMinuteBar]) -> FourHourCandle:
+def _aggregate_bucket(
+    key: tuple[str, date, int], bars: list[MassiveMinuteBar]
+) -> FourHourCandle:
     symbol, trading_day, bucket_index = key
     ordered = sorted(bars, key=lambda bar: bar.timestamp_ms)
     local_start = _local_start(ordered[0].timestamp_ms)
     bucket_start = _rth_bucket_start(trading_day, bucket_index)
-    bucket_end = min(bucket_start + timedelta(minutes=FOUR_HOUR_BUCKET_MINUTES), datetime.combine(trading_day, REGULAR_TRADING_CLOSE, EASTERN_TZ))
+    bucket_end = min(
+        bucket_start + timedelta(minutes=FOUR_HOUR_BUCKET_MINUTES),
+        datetime.combine(trading_day, REGULAR_TRADING_CLOSE, EASTERN_TZ),
+    )
     total_volume = sum(bar.volume for bar in ordered)
-    weighted_vwap = sum((bar.vwap or 0) * bar.volume for bar in ordered if bar.vwap is not None)
+    weighted_vwap = sum(
+        (bar.vwap or 0) * bar.volume for bar in ordered if bar.vwap is not None
+    )
     vwap_volume = sum(bar.volume for bar in ordered if bar.vwap is not None)
     transactions = [bar.transactions for bar in ordered if bar.transactions is not None]
 
@@ -297,16 +338,23 @@ def _date_arg(value: date | str) -> date:
 
 
 def _local_start(timestamp_ms: int) -> datetime:
-    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).astimezone(EASTERN_TZ)
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).astimezone(
+        EASTERN_TZ
+    )
 
 
 def _is_regular_trading_minute(local_start: datetime) -> bool:
     local_time = local_start.timetz().replace(tzinfo=None)
-    return local_start.weekday() < 5 and REGULAR_TRADING_OPEN <= local_time < REGULAR_TRADING_CLOSE
+    return (
+        local_start.weekday() < 5
+        and REGULAR_TRADING_OPEN <= local_time < REGULAR_TRADING_CLOSE
+    )
 
 
 def _rth_bucket_index(local_start: datetime) -> int:
-    session_open = datetime.combine(local_start.date(), REGULAR_TRADING_OPEN, EASTERN_TZ)
+    session_open = datetime.combine(
+        local_start.date(), REGULAR_TRADING_OPEN, EASTERN_TZ
+    )
     elapsed_minutes = int((local_start - session_open).total_seconds() // 60)
     return elapsed_minutes // FOUR_HOUR_BUCKET_MINUTES
 
@@ -318,7 +366,11 @@ def _rth_bucket_start(trading_day: date, bucket_index: int) -> datetime:
 
 
 def _parse_symbols(args: argparse.Namespace) -> list[str]:
-    symbols = [symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()] if args.symbols else []
+    symbols = (
+        [symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()]
+        if args.symbols
+        else []
+    )
     if symbols:
         return symbols
     return load_symbols_from_sqlite(args.db_path, args.symbol_limit)
@@ -328,17 +380,32 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Fetch Massive minute aggregates and store regular-trading-hours 4-hour candles."
     )
-    parser.add_argument("db_path", help="Path to the SQLite database to create or update.")
-    parser.add_argument("--start", required=True, help="Start date in YYYY-MM-DD format.")
+    parser.add_argument(
+        "db_path", help="Path to the SQLite database to create or update."
+    )
+    parser.add_argument(
+        "--start", required=True, help="Start date in YYYY-MM-DD format."
+    )
     parser.add_argument("--end", required=True, help="End date in YYYY-MM-DD format.")
-    parser.add_argument("--symbols", help="Comma-separated symbols. Defaults to russell_1000_components.")
-    parser.add_argument("--symbol-limit", type=int, help="Limit symbols loaded from russell_1000_components.")
-    parser.add_argument("--unadjusted", action="store_true", help="Request unadjusted Massive bars.")
+    parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbols. Defaults to russell_1000_components.",
+    )
+    parser.add_argument(
+        "--symbol-limit",
+        type=int,
+        help="Limit symbols loaded from russell_1000_components.",
+    )
+    parser.add_argument(
+        "--unadjusted", action="store_true", help="Request unadjusted Massive bars."
+    )
     args = parser.parse_args()
 
     symbols = _parse_symbols(args)
     if not symbols:
-        raise SystemExit("No symbols were provided or found in russell_1000_components.")
+        raise SystemExit(
+            "No symbols were provided or found in russell_1000_components."
+        )
 
     count = sync_massive_rth_4h_candles(
         args.db_path,
